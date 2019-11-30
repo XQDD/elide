@@ -6,34 +6,26 @@
 
 package com.yahoo.elide.graphql;
 
+import com.yahoo.elide.core.EntityDictionary;
+import com.yahoo.elide.core.RelationshipType;
+import graphql.Scalars;
+import graphql.schema.*;
+import io.swagger.annotations.ApiModel;
+import io.swagger.annotations.ApiModelProperty;
+import lombok.extern.slf4j.Slf4j;
+import lombok.val;
+import org.apache.commons.collections.CollectionUtils;
+
+import javax.validation.constraints.NotBlank;
+import javax.validation.constraints.NotEmpty;
+import javax.validation.constraints.NotNull;
+import java.util.*;
+import java.util.stream.Collectors;
+
 import static graphql.schema.GraphQLArgument.newArgument;
 import static graphql.schema.GraphQLFieldDefinition.newFieldDefinition;
 import static graphql.schema.GraphQLInputObjectField.newInputObjectField;
 import static graphql.schema.GraphQLObjectType.newObject;
-
-import com.yahoo.elide.core.EntityDictionary;
-import com.yahoo.elide.core.RelationshipType;
-
-import org.apache.commons.collections.CollectionUtils;
-
-import graphql.Scalars;
-import graphql.schema.DataFetcher;
-import graphql.schema.GraphQLArgument;
-import graphql.schema.GraphQLInputObjectType;
-import graphql.schema.GraphQLInputType;
-import graphql.schema.GraphQLList;
-import graphql.schema.GraphQLObjectType;
-import graphql.schema.GraphQLOutputType;
-import graphql.schema.GraphQLSchema;
-import graphql.schema.GraphQLType;
-import graphql.schema.GraphQLTypeReference;
-import lombok.extern.slf4j.Slf4j;
-
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Constructs a GraphQL schema (query and mutation documents) from an Elide EntityDictionary.
@@ -69,7 +61,8 @@ public class ModelBuilder {
 
     /**
      * Class constructor, constructs the custom arguments to handle mutations
-     * @param dictionary elide entity dictionary
+     *
+     * @param dictionary  elide entity dictionary
      * @param dataFetcher graphQL data fetcher
      */
     public ModelBuilder(EntityDictionary dictionary, DataFetcher dataFetcher) {
@@ -134,12 +127,52 @@ public class ModelBuilder {
         excludedEntities = new HashSet<>();
     }
 
+    public static GraphQLInputType getRequiredType(GraphQLInputType attributeType, boolean required) {
+        return required ? GraphQLNonNull.nonNull(attributeType) : attributeType;
+    }
+
+    public static GraphQLInputType getRequiredType(GraphQLList attributeType, boolean required) {
+        return required ? GraphQLNonNull.nonNull(attributeType) : attributeType;
+    }
+
+    public static GraphQLOutputType getRequiredType(GraphQLOutputType attributeType, boolean required) {
+        return required ? GraphQLNonNull.nonNull(attributeType) : attributeType;
+    }
+
+    public static GraphQLOutputType getRequiredType(GraphQLTypeReference attributeType, boolean required) {
+        return required ? GraphQLNonNull.nonNull(attributeType) : attributeType;
+    }
+
+    public static boolean isFieldRequired(
+            Class clazz,
+            ApiModelProperty apiModelProperty,
+            String fieldName,
+            EntityDictionary dictionary
+    ) {
+        if (apiModelProperty != null && apiModelProperty.required()) {
+            return true;
+        }
+        if (dictionary.getAttributeOrRelationAnnotation(clazz, NotNull.class, fieldName) != null) {
+            return true;
+        }
+        if (dictionary.getAttributeOrRelationAnnotation(clazz, NotBlank.class, fieldName) != null) {
+            return true;
+        }
+        if (dictionary.getAttributeOrRelationAnnotation(clazz, NotEmpty.class, fieldName) != null) {
+            return true;
+        }
+
+        return false;
+    }
+
+
     public void withExcludedEntities(Set<Class<?>> excludedEntities) {
         this.excludedEntities = excludedEntities;
     }
 
     /**
      * Builds a GraphQL schema.
+     *
      * @return The built schema.
      */
     public GraphQLSchema build() {
@@ -149,7 +182,7 @@ public class ModelBuilder {
             throw new IllegalArgumentException("None of the provided classes are exported by Elide");
         }
 
-        Set<Class<?>> rootClasses =  allClasses.stream().filter(dictionary::isRoot).collect(Collectors.toSet());
+        Set<Class<?>> rootClasses = allClasses.stream().filter(dictionary::isRoot).collect(Collectors.toSet());
 
         /*
          * Walk the object graph (avoiding cycles) and construct the GraphQL input object types.
@@ -226,6 +259,7 @@ public class ModelBuilder {
 
     /**
      * Builds a graphQL output object from an entity class.
+     *
      * @param entityClass The class to use to construct the output object.
      * @return The graphQL object
      */
@@ -241,7 +275,10 @@ public class ModelBuilder {
         GraphQLObjectType.Builder builder = newObject()
                 .name("_node__" + entityName);
 
+        builder.description(getTypeDescription(entityClass));
+
         String id = dictionary.getIdFieldName(entityClass);
+
 
         /* our id types are DeferredId objects (not Scalars.GraphQLID) */
         builder.field(newFieldDefinition()
@@ -267,10 +304,15 @@ public class ModelBuilder {
                 continue;
             }
 
+            val apiModelProperty = dictionary.getAttributeOrRelationAnnotation(entityClass, ApiModelProperty.class, attribute);
+            val description = apiModelProperty == null ? null : apiModelProperty.value();
+            val required = isFieldRequired(entityClass, apiModelProperty, attribute, dictionary);
+
             builder.field(newFieldDefinition()
                     .name(attribute)
+                    .description(description)
                     .dataFetcher(dataFetcher)
-                    .type((GraphQLOutputType) attributeType)
+                    .type(getRequiredType((GraphQLOutputType) attributeType, required))
             );
         }
 
@@ -283,26 +325,34 @@ public class ModelBuilder {
             String relationshipEntityName = dictionary.getJsonAliasFor(relationshipClass);
             RelationshipType type = dictionary.getRelationshipType(entityClass, relationship);
 
+
+            val apiModelProperty = dictionary.getAttributeOrRelationAnnotation(entityClass, ApiModelProperty.class, relationship);
+            val description = apiModelProperty == null ? null : apiModelProperty.value();
+            val required = isFieldRequired(entityClass, apiModelProperty, relationship, dictionary);
+
+
             if (type.isToOne()) {
                 builder.field(newFieldDefinition()
-                                .name(relationship)
-                                .dataFetcher(dataFetcher)
-                                .argument(relationshipOpArg)
-                                .argument(buildInputObjectArgument(relationshipClass, false))
-                                .type(new GraphQLTypeReference(relationshipEntityName))
+                        .name(relationship)
+                        .description(description)
+                        .dataFetcher(dataFetcher)
+                        .argument(relationshipOpArg)
+                        .argument(buildInputObjectArgument(relationshipClass, false))
+                        .type(getRequiredType(new GraphQLTypeReference(relationshipEntityName), required))
                 );
             } else {
                 builder.field(newFieldDefinition()
-                                .name(relationship)
-                                .dataFetcher(dataFetcher)
-                                .argument(relationshipOpArg)
-                                .argument(filterArgument)
-                                .argument(sortArgument)
-                                .argument(pageOffsetArgument)
-                                .argument(pageFirstArgument)
-                                .argument(idArgument)
-                                .argument(buildInputObjectArgument(relationshipClass, true))
-                                .type(new GraphQLTypeReference(relationshipEntityName))
+                        .name(relationship)
+                        .dataFetcher(dataFetcher)
+                        .description(description)
+                        .argument(relationshipOpArg)
+                        .argument(filterArgument)
+                        .argument(sortArgument)
+                        .argument(pageOffsetArgument)
+                        .argument(pageFirstArgument)
+                        .argument(idArgument)
+                        .argument(buildInputObjectArgument(relationshipClass, true))
+                        .type(getRequiredType(new GraphQLTypeReference(relationshipEntityName), required))
                 );
             }
         }
@@ -310,6 +360,14 @@ public class ModelBuilder {
         GraphQLObjectType queryObject = builder.build();
         queryObjectRegistry.put(entityClass, queryObject);
         return queryObject;
+    }
+
+    private String getTypeDescription(Class<?> entityClass) {
+        val apiModel = dictionary.getAnnotation(entityClass, ApiModel.class);
+        if (apiModel == null) {
+            return null;
+        }
+        return apiModel.value();
     }
 
     private GraphQLList buildEdgesObject(String relationName, GraphQLOutputType entityType) {
@@ -324,8 +382,9 @@ public class ModelBuilder {
 
     /**
      * Wraps a constructed GraphQL Input Object in an argument.
+     *
      * @param entityClass - The class to construct the input object from.
-     * @param asList Whether or not the argument is a single instance or a list.
+     * @param asList      Whether or not the argument is a single instance or a list.
      * @return The constructed argument.
      */
     private GraphQLArgument buildInputObjectArgument(Class<?> entityClass, boolean asList) {
@@ -333,18 +392,19 @@ public class ModelBuilder {
 
         if (asList) {
             return newArgument()
-                .name(ARGUMENT_DATA)
-                .type(new GraphQLList(argumentType))
-                .build();
+                    .name(ARGUMENT_DATA)
+                    .type(new GraphQLList(argumentType))
+                    .build();
         }
         return newArgument()
-            .name(ARGUMENT_DATA)
-            .type(argumentType)
-            .build();
+                .name(ARGUMENT_DATA)
+                .type(argumentType)
+                .build();
     }
 
     /**
      * Constructs a stub of an input objects with no relationships resolved.
+     *
      * @param clazz The class to translate into an input object.
      * @return The constructed input object stub.
      */
@@ -355,13 +415,16 @@ public class ModelBuilder {
 
         MutableGraphQLInputObjectType.Builder builder = MutableGraphQLInputObjectType.newMutableInputObject();
         builder.name(entityName + ARGUMENT_INPUT);
+        builder.description(getTypeDescription(clazz));
 
         String id = dictionary.getIdFieldName(clazz);
         builder.field(newInputObjectField()
                 .name(id)
                 .type(Scalars.GraphQLID));
 
-        for (String attribute : dictionary.getAttributes(clazz)) {
+        val attributes = new ArrayList<>(dictionary.getAttributes(clazz));
+        attributes.addAll(dictionary.getElideBoundRelationships(clazz));
+        for (String attribute : attributes) {
             Class<?> attributeClass = dictionary.getType(clazz, attribute);
 
             if (excludedEntities.contains(attributeClass)) {
@@ -375,6 +438,10 @@ public class ModelBuilder {
 
             GraphQLInputType attributeType = generator.attributeToInputObject(clazz, attributeClass, attribute);
 
+            val apiModelProperty = dictionary.getAttributeOrRelationAnnotation(clazz, ApiModelProperty.class, attribute);
+            val description = apiModelProperty == null ? null : apiModelProperty.value();
+            val required = isFieldRequired(clazz, apiModelProperty, attribute, dictionary);
+
             /* If the attribute is an object, we need to change its name so it doesn't conflict with query objects */
             if (attributeType instanceof GraphQLInputObjectType) {
                 String objectName = attributeType.getName() + ARGUMENT_INPUT;
@@ -382,7 +449,7 @@ public class ModelBuilder {
                     MutableGraphQLInputObjectType wrappedType =
                             new MutableGraphQLInputObjectType(
                                     objectName,
-                                    ((GraphQLInputObjectType) attributeType).getDescription(),
+                                    description,
                                     ((GraphQLInputObjectType) attributeType).getFields()
                             );
                     convertedInputs.put(objectName, wrappedType);
@@ -397,8 +464,9 @@ public class ModelBuilder {
             }
 
             builder.field(newInputObjectField()
-                .name(attribute)
-                .type(attributeType)
+                    .name(attribute)
+                    .description(description)
+                    .type(getRequiredType(attributeType, required))
             );
         }
 
@@ -421,17 +489,23 @@ public class ModelBuilder {
 
                 RelationshipType type = dictionary.getRelationshipType(clazz, relationship);
 
+                val apiModelProperty = dictionary.getAttributeOrRelationAnnotation(clazz, ApiModelProperty.class, relationship);
+                val description = apiModelProperty == null ? null : apiModelProperty.value();
+                val required = isFieldRequired(clazz, apiModelProperty, relationship, dictionary);
+
                 if (type.isToOne()) {
                     inputObj.setField(relationship, newInputObjectField()
-                        .name(relationship)
-                        .type(inputObjectRegistry.get(relationshipClass))
-                        .build()
+                            .name(relationship)
+                            .description(description)
+                            .type(getRequiredType(inputObjectRegistry.get(relationshipClass), required))
+                            .build()
                     );
                 } else {
                     inputObj.setField(relationship, newInputObjectField()
-                        .name(relationship)
-                        .type(new GraphQLList(inputObjectRegistry.get(relationshipClass)))
-                        .build()
+                            .name(relationship)
+                            .description(description)
+                            .type(getRequiredType(new GraphQLList(inputObjectRegistry.get(relationshipClass)), required))
+                            .build()
                     );
                 }
             }
